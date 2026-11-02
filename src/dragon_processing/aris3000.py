@@ -4,7 +4,7 @@ import numpy as np
 import xarray as xr
 from .adcp import define_rotation_nortek_XYZ_to_ENU
 
-from .utilities import convert_matlab_datenum, decode_matlab_char
+from .utilities import convert_matlab_datenum, decode_matlab_char, interp_datetime64 # NEEDS REVIEW: interp_datetime64 added for CTD depth
 
 
 def get_beam_direction_in_nortek_instrument_coords(beam_angles,degrees=True):
@@ -120,7 +120,22 @@ def read_aris_header(mat_file):
             'n_beams' : int(np.squeeze(header['numbeams'])),
         }
 
-def write_aris_netcdf(mat_paths,nc_file,frequency,batch=256):
+def write_aris_depth(nc,ctd):
+    # Interpolates CTD depth onto the time of each frame and writes it to an open NetCDF file as 'depth'
+    # Frames outside the CTD record get NaN instead of an extrapolated depth
+
+    times = np.asarray(nc['time'][:]).astype('datetime64[ns]') # Read frame times, stored as nanoseconds since epoch
+    depth = interp_datetime64(times,ctd.time.values,ctd.depth.values,left=np.nan,right=np.nan,fill_value='constant') # Interpolate depth at each frame time
+    if 'depth' not in nc.variables: # Create the variable if this file doesn't have one yet
+        var = nc.createVariable('depth','f8',('time',),fill_value=np.nan) # Set per-frame depth variable
+        var.units = 'meters' # Set units
+        var.notes = 'CTD depth below sea surface, linearly interpolated onto the time of each frame, NaN outside the CTD record' # Add metadata
+    nc['depth'][:] = depth # Write interpolated depth to frame
+    n_missing = int(np.isnan(depth).sum()) # Count frames without a depth
+    if n_missing: # Throw warning if any frames have no depth
+        print(f'Warning: {n_missing} of {depth.size} frames are outside the CTD record and have no depth')
+
+def write_aris_netcdf(mat_paths,nc_file,frequency,batch=256,ctd=None):
     # Writes every recording into one NetCDF file, one recording at a time, so only one recording is ever held in memory
     # The file is created at its final size from the headers, then each recording is written into its own time slice
 
@@ -197,12 +212,16 @@ def write_aris_netcdf(mat_paths,nc_file,frequency,batch=256):
             i += n # Advance file
             del ds, data # Free memory
 
+        if ctd is not None: # If CTD data was given...
+            print('adding CTD depth for each frame')
+            write_aris_depth(nc,ctd) # Write depth for each frame
+
         nc.setncatts(attributes) # Write global attributes
 
     partial_file.replace(nc_file) # Rewrite file name to show that it's been completely and properly compiled
 # ===========================================
 
-def process_deployment_aris(deployment_path,aris_frequency,overwrite=False):
+def process_deployment_aris(deployment_path,aris_frequency,overwrite=False,ctd=None):
 
     aris_paths = sorted(deployment_path.rglob('*.aris'))
 
@@ -227,6 +246,11 @@ def process_deployment_aris(deployment_path,aris_frequency,overwrite=False):
     nc_file = mat_paths[0].parent / f'{file_base}_aris.nc'
     if not overwrite and nc_file.is_file():
         print(f'Skipping matlab conversion to {nc_file.name}, already converted')
+        if ctd is not None: # If CTD data was given...
+            with netCDF4.Dataset(nc_file,'a') as nc: # Open the existing file to append, without rewriting the frames
+                if 'depth' not in nc.variables: # If depth isn't already included...
+                    print(f'adding CTD depth for each frame to {nc_file.name}')
+                    write_aris_depth(nc,ctd) # Write depth for each frame
     else:
 
         # ===== Marcel - Change =====
@@ -235,7 +259,7 @@ def process_deployment_aris(deployment_path,aris_frequency,overwrite=False):
         if missing:
             print(f'{missing} do not exist. please process with matlab first')
             return None
-        write_aris_netcdf(mat_paths,nc_file,aris_frequency)
+        write_aris_netcdf(mat_paths,nc_file,aris_frequency,ctd=ctd)
         # ===========================
 
     # The full array can be larger than memory, data is only read when accessed

@@ -1,17 +1,18 @@
 """Export ARIS frames from a combined *_aris.nc file as sonar fan images (.png).
 
-Intensity is colored with viridis (0-255). Filtered-out samples are set to 0 so they draw at the bottom of the viridis scale:
-    --threshold: samples at or below this intensity are filtered out
-    --min-range/--max-range: samples outside this distance from the sonar are filtered out
+Intensity is colored with viridis (0-255), and every raw sample is drawn. Filters only apply to finding the peaks:
+    --threshold: samples at or below this intensity can't be a peak
+    --min-range/--max-range: samples outside this distance from the sonar can't be a peak
 
 The strongest echo along each beam that survives both filters is that beam's peak. Peaks that are outliers are removed by
 a median absolute deviation (MAD) filter on each peak's median range difference to its neighbors and, if given, by a cutoff
 on distance from the median range of the peaks.
-A smoothing spline of range against beam angle is fit through the remaining peaks and drawn in cyan. Peaks are split into
+A smoothing spline of range against beam angle is fit through the remaining peaks and drawn in red. Peaks are split into
 segments wherever more than --spline-max-gap beams in a row have no peak, and each segment is fit separately so the
 curve never bridges a gap. Segments with fewer than --spline-min-peaks peaks are not drawn.
 The spline is only drawn on frames whose peaks pass a structure test, which compares the coherence and concentration of
 the peaks, before outlier removal, to what pure noise across the window would give.
+The CTD depth of each frame is reported in a box in the lower left of the fan.
 
 Arguments:
     <nc_file>: input NetCDF file with dragon aris3000 data
@@ -196,7 +197,7 @@ def main():
         parser.error('--min-range must be less than --max-range')
     if args.spline_lam is not None and args.spline_lam <= 0:
         parser.error('--spline-lam must be greater than 0')
-    if args.spline_min_peaks < 5: # make_smoothing_spline needs at least 5 points
+    if args.spline_min_peaks < 5:
         parser.error('--spline-min-peaks must be at least 5')
     if args.spline_max_gap < 0:
         parser.error('--spline-max-gap must be 0 or more')
@@ -226,6 +227,7 @@ def main():
     max_range = ds.max_range.values
     frame_rate = ds.frame_rate.values
     beam_angle = ds.beam_angle.values
+    depth = ds.depth.values if 'depth' in ds else None
 
     # Start at specified frame if no start timestamp is specified, or else start the frame nearest to specified start time
     start = args.start if args.start_time is None else nearest_frame(times, args.start_time)
@@ -252,15 +254,14 @@ def main():
     ax.set_ylabel('Range from Sonar (m)') # Set y-axis label
     ax.set_facecolor('white') # Background of plot area
     fig.colorbar(plt.cm.ScalarMappable(plt.Normalize(0, 255), 'viridis'), ax=ax, shrink=0.7, label='Echo Intensity (0 - 255)') # Generate colorbar
-    spline_line = None if args.no_spline else ax.plot([], [], color='cyan', linewidth=1.5, zorder=4)[0] # Spline through the beam peaks, points filled in per frame
+    spline_line = None if args.no_spline else ax.plot([], [], color='red', linewidth=1.5, zorder=4)[0] # Spline through the beam peaks, points filled in per frame
+    depth_box = ax.text(0.02, 0.02, '', transform=ax.transAxes, ha='left', va='bottom', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), zorder=5) # Report depth
 
     mesh, window = None, None # Initialize figure
     for i in frames: # For each frame...
         image, ranges, in_range = read_frame(ds, i, args.min_range, args.max_range) # Get frame, distance, and bins
         n_bins = in_range.size # Set size based on number of bins
         peak_bins, peak_beams = beam_peaks(image, in_range, args.threshold) # Get strongest surviving echo on each beam
-        survives = in_range[:, np.newaxis] & (image > args.threshold) # Samples inside the range filter and above the threshold
-        image = np.where(survives, image, 0) # Set filtered-out samples to 0, the bottom of the viridis scale
 
         # Sonar fan
         frame_window = (min_range[i], max_range[i], n_bins) # Establish window from frame parameters
@@ -295,6 +296,12 @@ def main():
                 spline_line.set_data(*fit_peak_spline(peak_beams[keep], peak_r[keep], beam_angle, args.spline_lam, args.spline_min_peaks, args.spline_max_gap)) # Fit this frame's peaks and move the line to it
             else: # If the frame failed the test...
                 spline_line.set_data([], []) # Skip the previous frame's spline
+        if depth is None: # If the file has no depth variable...
+            depth_box.set_text('Depth: not in file') # Report no depth available in NetCDF dataset
+        elif np.isnan(depth[i]): # If depth is missing for frame
+            depth_box.set_text('Depth: no CTD data') # Report no CTD data
+        else: # Otherwise...
+            depth_box.set_text(f'Depth: {depth[i]:.1f} m') # Report depth
 
         ax.set_title(
             f'frame {i} of {times.size - 1}    {str(times[i])[:23]}\n'

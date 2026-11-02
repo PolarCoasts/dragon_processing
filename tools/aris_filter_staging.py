@@ -176,7 +176,7 @@ def main():
     parser.add_argument('--outlier-max-from-median', type=float, help='Remove peaks more than this range (m) from the median range of the peaks, applied alongside the MAD filter (default: off)')
     parser.add_argument('--structure-max-coherence', type=float, default=0.5, help='Highest coherence (1.0 = noise-like spread, 0.0 = closely packed) a frame can have for the spline to be drawn (default: 0.5)')
     parser.add_argument('--structure-max-concentration', type=float, help='Highest concentration (1.0 = noise-like spread, 0.0 = all at one range) a frame can have for the spline to be drawn (default: off)')
-    parser.add_argument('--structure-neighbors', type=int, default=4, help='Neighborhood size / number of nearest peaks each peak is compared with for coherence test (default: 4)') #
+    parser.add_argument('--structure-neighbors', type=int, default=4, help='Neighborhood size / number of nearest peaks each peak is compared with for coherence test (default: 4)')
     parser.add_argument('--structure-min-peaks', type=int, default=10, help='Fewest peaks a frame needs to be tested, frames with fewer get no spline (default: 10)')
     parser.add_argument('--no-structure-test', action='store_true', help="Draw the spline without testing whether the peaks are noise-like")
     args = parser.parse_args()
@@ -186,7 +186,7 @@ def main():
         parser.error('--min-range must be less than --max-range')
     if args.spline_lam is not None and args.spline_lam <= 0:
         parser.error('--spline-lam must be greater than 0')
-    if args.spline_min_peaks < 5: # make_smoothing_spline needs at least 5 points
+    if args.spline_min_peaks < 5:
         parser.error('--spline-min-peaks must be at least 5')
     if args.spline_max_gap < 0:
         parser.error('--spline-max-gap must be 0 or more')

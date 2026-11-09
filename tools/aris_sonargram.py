@@ -24,6 +24,7 @@ Arguments:
     --spline-lam: smoothness of the peak spline, larger is smoother (default: chosen automatically for each segment)
     --spline-min-peaks: fewest peaks a segment needs to have a spline fit through it (at least 5)
     --spline-max-gap: most beams in a row without a peak that a segment can span before it is split
+    --spline-max-jump: largest range difference (m) between consecutive peaks before a segment is split (default: off)
     --no-spline: don't fit or draw the peak spline
     --outlier-mad: scaled MADs above the median score a peak must be to be removed, lower removes more
     --outlier-neighbors: number of nearest peaks each peak is compared with for the MAD filter
@@ -99,10 +100,14 @@ def beam_peaks(image, in_range, threshold):
     return peak_bins[has_peak], beams[has_peak]
 
 
-def fit_peak_spline(peak_beams, peak_ranges, beam_angle, lam, min_peaks, max_gap):
+def fit_peak_spline(peak_beams, peak_ranges, beam_angle, lam, min_peaks, max_gap, max_jump):
     # Fit a smoothing spline of range against beam angle through the beam peaks, one per segment of nearby peaks, and return the curves in cartesian coordinates (meters), with NaNs between segments so they draw as separate lines
 
-    breaks = np.flatnonzero(np.diff(peak_beams) > max_gap + 1) + 1 # Split wherever more than max_gap beams in a row have no peak
+    split = np.diff(peak_beams) > max_gap + 1 # Split wherever more than max_gap beams in a row have no peak
+    if max_jump is not None: # If the range jump split is on...
+        split |= np.abs(np.diff(peak_ranges)) > max_jump # Split wherever consecutive peaks are more than max_jump meters apart in range
+    breaks = np.flatnonzero(split) + 1 # Index of the first peak of each new segment
+
     x, y = [], []
     for segment in np.split(np.arange(peak_beams.size), breaks): # For each segment...
         if segment.size < min_peaks: # Too few peaks to fit a meaningful spline, skip it
@@ -179,6 +184,7 @@ def main():
     parser.add_argument('--spline-lam', type=float, help='Smoothness of the peak spline, larger is smoother (default: chosen automatically for each segment)')
     parser.add_argument('--spline-min-peaks', type=int, default=5, help='Fewest peaks a segment needs to have a spline fit through it (default: 5, minimum: 5)')
     parser.add_argument('--spline-max-gap', type=int, default=3, help='Most beams in a row without a peak that a segment can span before it is split (default: 3)')
+    parser.add_argument('--spline-max-jump', type=float, help='Largest range difference (m) between consecutive peaks before a segment is split (default: off)')
     parser.add_argument('--no-spline', action='store_true', help="Don't fit or draw the peak spline")
     parser.add_argument('--outlier-mad', type=float, default=3.0, help='Scales the amount that the median absolute deviation above the median of all points in a frame a peak must be to be removed as an outlier, lower removes more (default: 3)')
     parser.add_argument('--outlier-neighbors', type=int, default=4, help='Neighborhood size / number of nearest peaks each peak is compared with for outlier removal by scaled median absolute deviation (default: 4)')
@@ -201,6 +207,8 @@ def main():
         parser.error('--spline-min-peaks must be at least 5')
     if args.spline_max_gap < 0:
         parser.error('--spline-max-gap must be 0 or more')
+    if args.spline_max_jump is not None and args.spline_max_jump <= 0:
+        parser.error('--spline-max-jump must be greater than 0')
     if args.outlier_mad < 0:
         parser.error('--outlier-mad must be 0 or more')
     if args.outlier_neighbors < 1:
@@ -293,7 +301,7 @@ def main():
             skip_reason = None # Report nothing
         if spline_line is not None: # If the spline is turned on...
             if skip_reason is None: # And if the frame passed the test...
-                spline_line.set_data(*fit_peak_spline(peak_beams[keep], peak_r[keep], beam_angle, args.spline_lam, args.spline_min_peaks, args.spline_max_gap)) # Fit this frame's peaks and move the line to it
+                spline_line.set_data(*fit_peak_spline(peak_beams[keep], peak_r[keep], beam_angle, args.spline_lam, args.spline_min_peaks, args.spline_max_gap, args.spline_max_jump)) # Fit this frame's peaks and move the line to it
             else: # If the frame failed the test...
                 spline_line.set_data([], []) # Skip the previous frame's spline
         if depth is None: # If the file has no depth variable...

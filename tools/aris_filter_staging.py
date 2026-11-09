@@ -22,6 +22,7 @@ Arguments:
     --spline-lam: smoothness of the peak spline, larger is smoother (default: chosen automatically for each segment)
     --spline-min-peaks: fewest peaks a segment needs to have a spline fit through it (at least 5)
     --spline-max-gap: most beams in a row without a peak that a segment can span before it is split
+    --spline-max-jump: largest range difference (m) between consecutive peaks before a segment is split (default: off)
     --no-spline: don't fit or draw the peak spline
 
 Usage:
@@ -87,10 +88,14 @@ def beam_peaks(image, in_range, threshold):
     return peak_bins[has_peak], beams[has_peak]
 
 
-def fit_peak_spline(peak_beams, peak_ranges, beam_angle, lam, min_peaks, max_gap):
+def fit_peak_spline(peak_beams, peak_ranges, beam_angle, lam, min_peaks, max_gap, max_jump):
     # Fit a smoothing spline of range against beam angle through the beam peaks, one per segment of nearby peaks, and return the curves in cartesian coordinates (meters), with NaNs between segments so they draw as separate lines
 
-    breaks = np.flatnonzero(np.diff(peak_beams) > max_gap + 1) + 1 # Split wherever more than max_gap beams in a row have no peak
+    split = np.diff(peak_beams) > max_gap + 1 # Split wherever more than max_gap beams in a row have no peak
+    if max_jump is not None: # If the range jump split is on...
+        split |= np.abs(np.diff(peak_ranges)) > max_jump # Split wherever consecutive peaks are more than max_jump meters apart in range
+    breaks = np.flatnonzero(split) + 1 # Index of the first peak of each new segment
+
     x, y = [], []
     for segment in np.split(np.arange(peak_beams.size), breaks): # For each segment...
         if segment.size < min_peaks: # Too few peaks to fit a meaningful spline, skip it
@@ -168,6 +173,7 @@ def main():
     parser.add_argument('--spline-lam', type=float, help='Smoothness of the peak spline, larger is smoother (default: chosen automatically for each segment)')
     parser.add_argument('--spline-min-peaks', type=int, default=5, help='Fewest peaks a segment needs to have a spline fit through it (default: 5, minimum: 5)')
     parser.add_argument('--spline-max-gap', type=int, default=3, help='Most beams in a row without a peak that a segment can span before it is split (default: 3)')
+    parser.add_argument('--spline-max-jump', type=float, help='Largest range difference (m) between consecutive peaks before a segment is split (default: off)')
     parser.add_argument('--no-spline', action='store_true', help="Don't fit or draw the peak spline")
     parser.add_argument('--outlier-mad', type=float, default=3.0, help='Scales the amount that the median absolute deviation above the median of all points in a frame a peak must be to be removed as an outlier, lower removes more (default: 3)')
     parser.add_argument('--outlier-neighbors', type=int, default=4, help='Neighborhood size / number of nearest peaks each peak is compared with for outlier removal by scaled median absolute deviation (default: 4)')
@@ -184,6 +190,8 @@ def main():
         parser.error('--threshold must be between 0 and 254')
     if args.min_range >= args.max_range:
         parser.error('--min-range must be less than --max-range')
+    if args.spline_max_jump is not None and args.spline_max_jump <= 0:
+        parser.error('--spline-max-jump must be greater than 0')
     if args.spline_lam is not None and args.spline_lam <= 0:
         parser.error('--spline-lam must be greater than 0')
     if args.spline_min_peaks < 5:
@@ -314,6 +322,8 @@ def main():
             x, y = fan_coordinates(min_range[i], max_range[i], n_bins, beam_angle) # Get cartesian coordinates for each cell from sonar polar
             mesh = ax_fan.pcolormesh(x, y, image, cmap=cmap, norm=norm, shading='flat') # Set mesh
             window = frame_window # Set window for next frame to reference geometry
+
+        # Peaks
         peak_r, peak_a = ranges[peak_bins], np.deg2rad(beam_angle[peak_beams]) # Range and angle of each beam peak
         peak_x, peak_y = peak_r * np.sin(peak_a), peak_r * np.cos(peak_a) # Convert peaks from polar to cartesian (meters), split out of the line below so rejected peaks can use it too
         keep = np.ones(peak_beams.size, dtype=bool) # Intialize array of peaks to keep
@@ -329,6 +339,8 @@ def main():
         if rejected is not None: # If either filter is on...
             count_text += f'\nRejected: {(~keep).sum()} (MAD {n_mad_rejected}, median {(~keep).sum() - n_mad_rejected})' # Report how many peaks were removed, and by which filter
         window_width = min(max_range[i], args.max_range) - max(min_range[i], args.min_range) # Get width (m) of the window peaks can fall in, the instrument's range cut down by the range filter
+
+        # Structure Test — Concentration / Coherence
         concentration, coherence = peak_structure(peak_beams, peak_r, window_width, args.structure_neighbors, args.structure_min_peaks) # Get concentration and coherence ratios
         count_text += f'\nConcentration: {concentration:.2f}\nCoherence: {coherence:.2f}' # Report both ratios in figure
         if args.no_structure_test: # If the coherence/concentration structure test is off...
@@ -343,7 +355,7 @@ def main():
             skip_reason = None # Report nothing
         if spline_line is not None: # If the spline is turned on...
             if skip_reason is None: # And if the frame passed the test...
-                spline_line.set_data(*fit_peak_spline(peak_beams[keep], peak_r[keep], beam_angle, args.spline_lam, args.spline_min_peaks, args.spline_max_gap)) # Fit this frame's peaks and move the line to it
+                spline_line.set_data(*fit_peak_spline(peak_beams[keep], peak_r[keep], beam_angle, args.spline_lam, args.spline_min_peaks, args.spline_max_gap, args.spline_max_jump)) # Fit this frame's peaks and move the line to it
                 count_text += '\nSpline: drawn' # Report tha the spline has been drawn
             else: # If the frame failed the test...
                 spline_line.set_data([], []) # Skip the previous frame's spline

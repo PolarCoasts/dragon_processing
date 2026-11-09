@@ -33,6 +33,7 @@ spline = True # False to turn the peak spline off
 spline_lam = None # Smoothness, larger is smoother, must be > 0 (default: chosen automatically for each segment)
 spline_min_peaks = 5 # Fewest peaks a segment needs to have a spline fit through it, at least 5 (default: 5)
 spline_max_gap = 3 # Most beams in a row without a peak before a segment is split (default: 3)
+spline_max_jump = False # Distance (m) between peaks before a segment is split (default: off)
 
 # ===== Outlier filter ===== #
 outlier_filter = True # Outlier filter on (true) / off (false)
@@ -69,6 +70,7 @@ options = {
     '--spline-lam': spline_lam,
     '--spline-min-peaks': spline_min_peaks,
     '--spline-max-gap': spline_max_gap,
+    '--spline-max-jump': spline_max_jump,
     '--outlier-mad': outlier_mad,
     '--outlier-neighbors': outlier_neighbors,
     '--outlier-min-diff': outlier_min_diff,

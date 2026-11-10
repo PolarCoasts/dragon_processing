@@ -21,6 +21,8 @@ Arguments:
     --start-time/--end-time: start and end datetime timestamp for visualization (UTC), will approximate to closest timestamp
     --min-range/--max-range: specifies minimum and maximum extents for band-pass range filter
     --threshold: specifies high-pass intensity threshold value
+    --dynamic-threshold-coef: intensity the threshold is lowered for every meter a frame's median peak range is beyond the sonar's minimum range (default: 0, off)
+    --dynamic-threshold-hold: most frames a noise-like frame can keep the last passing frame's threshold before resetting to --threshold (default: 10)
     --spline-lam: smoothness of the peak spline, larger is smoother (default: chosen automatically for each segment)
     --spline-min-peaks: fewest peaks a segment needs to have a spline fit through it (at least 5)
     --spline-max-gap: most beams in a row without a peak that a segment can span before it is split
@@ -163,6 +165,18 @@ def peak_structure(peak_beams, peak_ranges, window_width, n_neighbors, min_peaks
     coherence = np.median(neighbor_scores(peak_beams, peak_ranges, n_neighbors)) / (0.3 * window_width) # Ratio of median difference scores in neighborhood to that of noise, simulated to give a score of ~0.3 of the window width
     return concentration, coherence # Return both ratios
 
+
+def structure_skip_reason(concentration, coherence, max_coherence, max_concentration):
+    # Get why a frame fails the structure test, None if it passes
+
+    if np.isnan(coherence): # If there are not enough peaks to test...
+        return 'too few peaks' # Report too few peaks
+    if coherence > max_coherence: #  If the calculated coherence is greater than the user set cutoff...
+        return 'coherence' # Report spline not drawn due to coherence test failing
+    if max_concentration is not None and concentration > max_concentration: # If calculated concentration is greater than the user set cutoff...
+        return 'concentration' # Report spline is not drawn due to concentration test failing
+    return None # If all tests are passed, report nothing
+
 # ============================
 
 # ===== Main Runtime Loop =====
@@ -179,6 +193,8 @@ def main():
     end_group.add_argument('--end', type=int, help='Last frame to export (default: last frame in the file)')
     end_group.add_argument('--end-time', help='Last frame to export is the one nearest this time, e.g. 2026-08-17T20:20:00')
     parser.add_argument('--threshold', type=int, default=50, help='Intensity a sample must exceed to survive the filter (default: 50)')
+    parser.add_argument('--dynamic-threshold-coef', type=float, default=0.0, help="Intensity the threshold is lowered for every meter a frame's median peak range is beyond the sonar's minimum range for that frame, --threshold applies at the sonar's minimum range, must be 0 or more (default: 0, dynamic threshold off)")
+    parser.add_argument('--dynamic-threshold-hold', type=int, default=10, help='Most frames since the last frame that passed the structure test that a frame failing the coherence or concentration test can keep that frame\'s threshold, after which it resets to --threshold (default: 10)')
     parser.add_argument('--min-range', type=float, default=0, help='Closest range from the sonar (m) a sample must be at to survive the filter (default: no limit)')
     parser.add_argument('--max-range', type=float, default=float('inf'), help='Farthest range from the sonar (m) a sample must be at to survive the filter (default: no limit)')
     parser.add_argument('--spline-lam', type=float, help='Smoothness of the peak spline, larger is smoother (default: chosen automatically for each segment)')
@@ -199,6 +215,10 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.threshold < 255:
         parser.error('--threshold must be between 0 and 254')
+    if args.dynamic_threshold_coef < 0:
+        parser.error('--dynamic-threshold-coef must be 0 or more')
+    if args.dynamic_threshold_hold < 0:
+        parser.error('--dynamic-threshold-hold must be 0 or more')
     if args.min_range >= args.max_range:
         parser.error('--min-range must be less than --max-range')
     if args.spline_lam is not None and args.spline_lam <= 0:
@@ -251,6 +271,46 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True) # Create the output directory if needed
     digits = len(str(times.size - 1)) # Zero-pad file names so they sort in frame order
 
+    # Dynamic threshold, lowered for each frame by coef for every meter its median peak range is beyond the sonar's minimum range for that frame
+    thresholds = np.full(len(frames), args.threshold, dtype=int) # Intensity threshold of each frame, the base threshold unless the dynamic threshold is on
+    if args.dynamic_threshold_coef > 0: # If the dynamic threshold is on...
+        median_ranges = np.full(len(frames), np.nan) # Median peak range of each frame, NaN for frames with no peaks or that fail the structure test
+        n_carried = 0 # Number of frames that kept the previous frame's threshold
+        n_held = 0 # Number of noise-like frames that kept the last passing frame's threshold
+        last_pass = args.threshold # Threshold of the last frame that passed the structure test
+        since_pass = 0 # Frames since the last frame that passed the structure test
+        for k, i in enumerate(frames): # For each frame, in order, so each one can use the threshold set for the one before it...
+            image, ranges, in_range = read_frame(ds, i, args.min_range, args.max_range) # Read the frame
+            previous = thresholds[k - 1] if k > 0 else args.threshold # Previous frame's threshold, the base threshold for the first frame
+            since_pass += 1 # Count this frame, reset below if it passes
+            peak_bins, peak_beams = beam_peaks(image, in_range, previous) # First pass peaks, found with the previous frame's threshold
+            if peak_bins.size == 0: # If there are no peaks to take a median of...
+                thresholds[k] = previous # Keep the previous frame's threshold instead of snapping back to the base threshold
+                n_carried += 1
+                continue # Leave it NaN
+            peak_r = ranges[peak_bins] # Range of each beam peak
+            if not args.no_structure_test: # If the structure test is on...
+                window_width = min(max_range[i], args.max_range) - max(min_range[i], args.min_range) # Get width (m) of the window peaks can fall in
+                concentration, coherence = peak_structure(peak_beams, peak_r, window_width, args.structure_neighbors, args.structure_min_peaks) # Get concentration and coherence ratios
+                skip_reason = structure_skip_reason(concentration, coherence, args.structure_max_coherence, args.structure_max_concentration) # Get why the frame fails, None if it passes
+                if skip_reason == 'too few peaks': # If the frame fails only for having too few peaks...
+                    thresholds[k] = previous # Keep the previous frame's threshold instead of snapping back to the base threshold
+                    n_carried += 1
+                    continue # Leave it NaN
+                if skip_reason is not None: # If the frame fails the coherence or concentration test, its peaks look like noise...
+                    if since_pass <= args.dynamic_threshold_hold: # And the last passing frame is recent...
+                        thresholds[k] = last_pass # Keep the last passing frame's threshold
+                        n_held += 1
+                    continue # Leave it NaN, otherwise it resets to the base threshold
+            median_ranges[k] = np.median(peak_r) # Get its median peak range
+            shifted = args.threshold - args.dynamic_threshold_coef * (median_ranges[k] - min_range[i]) # Lower the base threshold linearly with how far the median peak range is beyond the sonar's minimum range, where the threshold equals --threshold
+            thresholds[k] = np.clip(np.round(shifted), 0, 254) # Round to a whole intensity and keep it a valid threshold
+            last_pass = thresholds[k] # Remember it for later noise-like frames
+            since_pass = 0 # Restart the hold
+        has_median = ~np.isnan(median_ranges) # Frames with peaks that pass the structure test
+        n_reset = len(frames) - has_median.sum() - n_carried - n_held # Noise-like frames past the hold, which use the base threshold
+        print(f'Dynamic threshold: {has_median.sum()} of {len(frames)} frames shifted, {n_carried} kept the previous threshold, {n_held} held the last passing threshold, {n_reset} reset, thresholds {thresholds.min()}-{thresholds.max()}')
+
     # Generate figure with one fixed extent covering every selected frame, so the scale doesn't jump between recordings
     r_min, r_max = min_range[frames].min(), max_range[frames].max() # Get minimum and maximum range
     max_angle = np.deg2rad(np.abs(beam_angle).max()) # Determine extent of furthest angle
@@ -266,10 +326,11 @@ def main():
     depth_box = ax.text(0.02, 0.02, '', transform=ax.transAxes, ha='left', va='bottom', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), zorder=5) # Report depth
 
     mesh, window = None, None # Initialize figure
-    for i in frames: # For each frame...
+    for k, i in enumerate(frames): # For each frame...
         image, ranges, in_range = read_frame(ds, i, args.min_range, args.max_range) # Get frame, distance, and bins
         n_bins = in_range.size # Set size based on number of bins
-        peak_bins, peak_beams = beam_peaks(image, in_range, args.threshold) # Get strongest surviving echo on each beam
+        threshold = int(thresholds[k]) # This frame's intensity threshold
+        peak_bins, peak_beams = beam_peaks(image, in_range, threshold) # Get strongest surviving echo on each beam
 
         # Sonar fan
         frame_window = (min_range[i], max_range[i], n_bins) # Establish window from frame parameters
@@ -291,14 +352,8 @@ def main():
         concentration, coherence = peak_structure(peak_beams, peak_r, window_width, args.structure_neighbors, args.structure_min_peaks) # Get concentration and coherence ratios
         if args.no_structure_test: # If the coherence/concentration structure test is off...
             skip_reason = None # Draw a spline for all frames with peaks above minimum
-        elif np.isnan(coherence): # If there are not enough peaks to test...
-            skip_reason = 'too few peaks' # Report too few peaks
-        elif coherence > args.structure_max_coherence: #  If the calculated coherence is greater than the user set cutoff...
-            skip_reason = 'coherence' # Report spline not drawn due to coherence test failing
-        elif args.structure_max_concentration is not None and concentration > args.structure_max_concentration: # If calculated concentration is greater than the user set cutoff...
-            skip_reason = 'concentration' # Report spline is not drawn due to concentration test failing
-        else: # If all tests are passed
-            skip_reason = None # Report nothing
+        else:
+            skip_reason = structure_skip_reason(concentration, coherence, args.structure_max_coherence, args.structure_max_concentration) # Get why the frame fails, None if it passes
         if spline_line is not None: # If the spline is turned on...
             if skip_reason is None: # And if the frame passed the test...
                 spline_line.set_data(*fit_peak_spline(peak_beams[keep], peak_r[keep], beam_angle, args.spline_lam, args.spline_min_peaks, args.spline_max_gap, args.spline_max_jump)) # Fit this frame's peaks and move the line to it

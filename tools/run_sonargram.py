@@ -22,6 +22,8 @@ end_time = None # e.g. "2026-08-17T18:09:21", the frame nearest this time (UTC)
 
 # ===== Filters =====
 threshold = 50 # Intensity a sample must exceed to survive the filter, 0-254 (default: 50)
+dynamic_threshold_coef = 0.0 # Intensity the threshold changes for every meter the median peak range is beyond the sonar's minimum range for that frame, lowered for farther frames, 0 or more (default: 0, dynamic threshold off)
+dynamic_threshold_hold = 10 # Most frames since the last frame that passed the structure test that a frame failing the coherence or concentration test can keep that frame's threshold, then it resets to threshold (default: 10)
 min_range = None # Closest range from the sonar (m) a sample must be at (default: no limit)
 max_range = None # Farthest range from the sonar (m) a sample must be at (default: no limit)
 
@@ -30,6 +32,7 @@ spline = True # False to turn the peak spline off
 spline_lam = None # Smoothness, larger is smoother, must be > 0 (default: chosen automatically for each segment)
 spline_min_peaks = 5 # Fewest peaks a segment needs to have a spline fit through it, at least 5 (default: 5)
 spline_max_gap = 3 # Most beams in a row without a peak before a segment is split (default: 3)
+spline_max_jump = None # Distance (m) between peaks before a segment is split (default: off)
 
 # ===== Outlier filter ===== #
 outlier_filter = True # Outlier filter on (true) / off (false)
@@ -60,11 +63,14 @@ options = {
     '--start-time': start_time,
     '--end-time': end_time,
     '--threshold': threshold,
+    '--dynamic-threshold-coef': dynamic_threshold_coef,
+    '--dynamic-threshold-hold': dynamic_threshold_hold,
     '--min-range': min_range,
     '--max-range': max_range,
     '--spline-lam': spline_lam,
     '--spline-min-peaks': spline_min_peaks,
     '--spline-max-gap': spline_max_gap,
+    '--spline-max-jump': spline_max_jump,
     '--outlier-mad': outlier_mad,
     '--outlier-neighbors': outlier_neighbors,
     '--outlier-min-diff': outlier_min_diff,

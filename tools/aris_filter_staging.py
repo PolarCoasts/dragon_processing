@@ -88,6 +88,15 @@ def beam_peaks(image, in_range, threshold):
     return peak_bins[has_peak], beams[has_peak]
 
 
+def threshold_cmap(threshold):
+    # Get the blue (filtered out) / red (survives) colormap with a hard cut at the threshold
+
+    lightest = 0.6 # Lightest extent of blue and red symbology for under/over intensity cutoff threshold
+    filtered_colors = plt.cm.Blues(np.linspace(1, lightest, threshold + 1)) # Set filtered intensities to blue
+    survivor_colors = plt.cm.Reds(np.linspace(lightest, 1, 255 - threshold)) # Set survivor intensities to red
+    return matplotlib.colors.ListedColormap(np.vstack([filtered_colors, survivor_colors]), name='filtered_blue_survivor_red').with_extremes(bad='gray') # Initialize color map
+
+
 def fit_peak_spline(peak_beams, peak_ranges, beam_angle, lam, min_peaks, max_gap, max_jump):
     # Fit a smoothing spline of range against beam angle through the beam peaks, one per segment of nearby peaks, and return the curves in cartesian coordinates (meters), with NaNs between segments so they draw as separate lines
 
@@ -151,6 +160,18 @@ def peak_structure(peak_beams, peak_ranges, window_width, n_neighbors, min_peaks
     coherence = np.median(neighbor_scores(peak_beams, peak_ranges, n_neighbors)) / (0.3 * window_width) # Ratio of median difference scores in neighborhood to that of noise, simulated to give a score of ~0.3 of the window width
     return concentration, coherence # Return both ratios
 
+
+def structure_skip_reason(concentration, coherence, max_coherence, max_concentration):
+    # Get why a frame fails the structure test, None if it passes
+
+    if np.isnan(coherence): # If there are not enough peaks to test...
+        return 'too few peaks' # Report too few peaks
+    if coherence > max_coherence: #  If the calculated coherence is greater than the user set cutoff...
+        return 'coherence' # Report spline not drawn due to coherence test failing
+    if max_concentration is not None and concentration > max_concentration: # If calculated concentration is greater than the user set cutoff...
+        return 'concentration' # Report spline is not drawn due to concentration test failing
+    return None # If all tests are passed, report nothing
+
 # ============================
 
 # ===== Main Runtime Loop =====
@@ -167,6 +188,8 @@ def main():
     end_group.add_argument('--end', type=int, help='Last frame to export (default: last frame in the file)')
     end_group.add_argument('--end-time', help=':ast frame to export is the one nearest this time, e.g. 2026-08-17T20:20:00')
     parser.add_argument('--threshold', type=int, default=50, help='Intensity a sample must exceed to survive the filter (default: 50)')
+    parser.add_argument('--dynamic-threshold-coef', type=float, default=0.0, help="Intensity the threshold is lowered for every meter a frame's median peak range is beyond the sonar's minimum range for that frame, --threshold applies at the sonar's minimum range, must be 0 or more (default: 0, dynamic threshold off)")
+    parser.add_argument('--dynamic-threshold-hold', type=int, default=10, help='Most frames since the last frame that passed the structure test that a frame failing the coherence or concentration test can keep that frame\'s threshold, after which it resets to --threshold (default: 10)')
     parser.add_argument('--min-range', type=float, default=0, help='Closest range from the sonar (m) a sample must be at to survive the filter (default: no limit)')
     parser.add_argument('--max-range', type=float, default=float('inf'), help='Farthest range from the sonar (m) a sample must be at to survive the filter (default: no limit)')
     parser.add_argument('--range-bins', type=int, default=100, help='Number of bins in the range histogram (default 100)')
@@ -188,6 +211,10 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.threshold < 255:
         parser.error('--threshold must be between 0 and 254')
+    if args.dynamic_threshold_coef < 0:
+        parser.error('--dynamic-threshold-coef must be 0 or more')
+    if args.dynamic_threshold_hold < 0:
+        parser.error('--dynamic-threshold-hold must be 0 or more')
     if args.min_range >= args.max_range:
         parser.error('--min-range must be less than --max-range')
     if args.spline_max_jump is not None and args.spline_max_jump <= 0:
@@ -244,21 +271,58 @@ def main():
     r_min, r_max = min_range[frames].min(), max_range[frames].max() # Get minimum and maximum range
     range_edges = np.linspace(r_min, r_max, args.range_bins + 1) # Get edges of these for visualization
 
+    # Dynamic threshold, lowered for each frame by coef for every meter its median peak range is beyond the sonar's minimum range for that frame
+    thresholds = np.full(len(frames), args.threshold, dtype=int) # Intensity threshold of each frame, the base threshold unless the dynamic threshold is on
+    if args.dynamic_threshold_coef > 0: # If the dynamic threshold is on...
+        median_ranges = np.full(len(frames), np.nan) # Median peak range of each frame, NaN for frames with no peaks or that fail the structure test
+        n_carried = 0 # Number of frames that kept the previous frame's threshold
+        n_held = 0 # Number of noise-like frames that kept the last passing frame's threshold
+        last_pass = args.threshold # Threshold of the last frame that passed the structure test
+        since_pass = 0 # Frames since the last frame that passed the structure test
+        for k, i in enumerate(frames): # For each frame, in order, so each one can use the threshold set for the one before it...
+            image, ranges, in_range = read_frame(ds, i, args.min_range, args.max_range) # Read the frame
+            previous = thresholds[k - 1] if k > 0 else args.threshold # Previous frame's threshold, the base threshold for the first frame
+            since_pass += 1 # Count this frame, reset below if it passes
+            peak_bins, peak_beams = beam_peaks(image, in_range, previous) # First pass peaks, found with the previous frame's threshold
+            if peak_bins.size == 0: # If there are no peaks to take a median of...
+                thresholds[k] = previous # Keep the previous frame's threshold instead of snapping back to the base threshold
+                n_carried += 1
+                continue # Leave it NaN
+            peak_r = ranges[peak_bins] # Range of each beam peak
+            if not args.no_structure_test: # If the structure test is on...
+                window_width = min(max_range[i], args.max_range) - max(min_range[i], args.min_range) # Get width (m) of the window peaks can fall in
+                concentration, coherence = peak_structure(peak_beams, peak_r, window_width, args.structure_neighbors, args.structure_min_peaks) # Get concentration and coherence ratios
+                skip_reason = structure_skip_reason(concentration, coherence, args.structure_max_coherence, args.structure_max_concentration) # Get why the frame fails, None if it passes
+                if skip_reason == 'too few peaks': # If the frame fails only for having too few peaks...
+                    thresholds[k] = previous # Keep the previous frame's threshold instead of snapping back to the base threshold
+                    n_carried += 1
+                    continue # Leave it NaN
+                if skip_reason is not None: # If the frame fails the coherence or concentration test, its peaks look like noise...
+                    if since_pass <= args.dynamic_threshold_hold: # And the last passing frame is recent...
+                        thresholds[k] = last_pass # Keep the last passing frame's threshold
+                        n_held += 1
+                    continue # Leave it NaN, otherwise it resets to the base threshold
+            median_ranges[k] = np.median(peak_r) # Get its median peak range
+            shifted = args.threshold - args.dynamic_threshold_coef * (median_ranges[k] - min_range[i]) # Lower the base threshold linearly with how far the median peak range is beyond the sonar's minimum range, where the threshold equals --threshold
+            thresholds[k] = np.clip(np.round(shifted), 0, 254) # Round to a whole intensity and keep it a valid threshold
+            last_pass = thresholds[k] # Remember it for later noise-like frames
+            since_pass = 0 # Restart the hold
+        has_median = ~np.isnan(median_ranges) # Frames with peaks that pass the structure test
+        n_reset = len(frames) - has_median.sum() - n_carried - n_held # Noise-like frames past the hold, which use the base threshold
+        print(f'Dynamic threshold: {has_median.sum()} of {len(frames)} frames shifted, {n_carried} kept the previous threshold, {n_held} held the last passing threshold, {n_reset} reset, thresholds {thresholds.min()}-{thresholds.max()}')
+
     # Count every selected frame first, so both histograms' y-axes can be fixed to their tallest bar
     intensity_counts = np.zeros((len(frames), 256), dtype='i8') # Initialize intensity counter
     range_counts = np.zeros((len(frames), args.range_bins), dtype='i8') # Initialize range counter
     for k, i in enumerate(frames): # For each frame...
         image, ranges, in_range = read_frame(ds, i, args.min_range, args.max_range) # Read the frame
         intensity_counts[k] = np.bincount(image[in_range].ravel(), minlength=256) # Get every intensity value inside the range filter
-        survivors_per_bin = (image > args.threshold).sum(axis=1) # Number of beams surviving the intensity filter at each bin
+        survivors_per_bin = (image > thresholds[k]).sum(axis=1) # Number of beams surviving the intensity filter at each bin
         range_counts[k] = np.histogram(ranges, bins=range_edges, weights=survivors_per_bin)[0] # Get every range value 
     print(f'Counted {len(frames)} frames')
 
     # Set symbology
-    lightest = 0.6 # Lightest extent of blue and red symbology for under/over intensity cutoff threshold
-    filtered_colors = plt.cm.Blues(np.linspace(1, lightest, args.threshold + 1)) # Set filtered intensities to blue
-    survivor_colors = plt.cm.Reds(np.linspace(lightest, 1, 255 - args.threshold)) # Set survivor intensities to red
-    cmap = matplotlib.colors.ListedColormap(np.vstack([filtered_colors, survivor_colors]), name='filtered_blue_survivor_red').with_extremes(bad='gray') # Initialize color map
+    cmap = threshold_cmap(args.threshold) # Initialize color map
     norm = matplotlib.colors.Normalize(vmin=-0.5, vmax=255.5) # Map intensity values from 0 to 1
 
     # Generate figure: sonar fan on the left, intensity and range histograms stacked on the right
@@ -273,9 +337,10 @@ def main():
     ax_fan.set_xlabel('Across-beam Distance (m)') # Set x-axis label
     ax_fan.set_ylabel('Range from Sonar (m)') # Set y-axis label
     ax_fan.set_facecolor('white') # Background of plot area
-    colorbar = fig.colorbar(plt.cm.ScalarMappable(norm, cmap), ax=ax_fan, shrink=0.7, label=f'Echo Intensity (Blue: ≤ {args.threshold}, Filtered Out; Red: Survives)') # Generate colorbar
+    colorbar_mappable = plt.cm.ScalarMappable(norm, cmap) # Kept so the colorbar can be recolored for each frame's threshold
+    colorbar = fig.colorbar(colorbar_mappable, ax=ax_fan, shrink=0.7, label=f'Echo Intensity (Blue: ≤ {args.threshold}, Filtered Out; Red: Survives)') # Generate colorbar
     colorbar.set_ticks([0, args.threshold, 255]) # Sets numbers on colorbar
-    colorbar.ax.axhline(args.threshold + 0.5, color='black', linewidth=1) # Set line marking the intensity threshold
+    threshold_marker = colorbar.ax.axhline(args.threshold + 0.5, color='black', linewidth=1) # Set line marking the intensity threshold
     peaks = ax_fan.scatter([], [], s=8, color='yellow', edgecolors='none', zorder=3, label='Beam Peak') # Marker for the strongest surviving echo on each beam, positions filled in per frame
     rejected = None if args.no_outlier_filter and args.outlier_max_from_median is None else ax_fan.scatter([], [], s=12, marker='x', color='magenta', linewidths=0.8, zorder=3, label='Rejected Peak') # Marker for peaks removed as outliers
     spline_line = None if args.no_spline else ax_fan.plot([], [], color='cyan', linewidth=1.5, zorder=4, label='Peak Spline')[0] # Spline through the beam peaks, points filled in per frame
@@ -288,10 +353,10 @@ def main():
     intensity_bars = ax_intensity.bar(intensities, np.zeros(256), width=1, color=cmap(norm(intensities)), edgecolor='none') # Set color
     ax_intensity.set_xlim(-0.5, 255.5) # Set limit of x-axis based on possible intensity values with some headroom
     ax_intensity.set_ylim(0, max(intensity_counts.max(), 1) * 1.05) # Set limit to be tallest bar across the selected frames with some headroom
-    ax_intensity.axvline(args.threshold, color='black', linestyle='--', label=f'Intensity Threshold ({args.threshold})') # Threshold line marker
+    intensity_line = ax_intensity.axvline(args.threshold, color='black', linestyle='--', label=f'Intensity Threshold ({args.threshold})') # Threshold line marker
     ax_intensity.set_xlabel('Echo Intensity (0 - 255)') # X-axis label
     ax_intensity.set_ylabel('Number of Samples') # Y-axis label
-    ax_intensity.legend() # Visualize legend
+    intensity_legend = ax_intensity.legend() # Visualize legend
 
     # Range histogram of samples surviving the intensity filter
     range_centers = (range_edges[1:] + range_edges[:-1]) / 2 # Get range centers again
@@ -309,8 +374,25 @@ def main():
     for k, i in enumerate(frames): # For each frame...
         image, ranges, in_range = read_frame(ds, i, args.min_range, args.max_range) # Get frame, distance, and bins
         n_bins = in_range.size # Set size based on number of bins
-        peak_bins, peak_beams = beam_peaks(image, in_range, args.threshold) # Get strongest surviving echo on each beam
+        threshold = int(thresholds[k]) # This frame's intensity threshold
+        peak_bins, peak_beams = beam_peaks(image, in_range, threshold) # Get strongest surviving echo on each beam
         image = np.ma.masked_array(image, mask=np.broadcast_to(~in_range[:, np.newaxis], image.shape)) # Mask bins outside the range filter so they draw gray
+
+        # Dynamic threshold
+        if args.dynamic_threshold_coef > 0: # If the dynamic threshold is on, move everything that shows the threshold to this frame's
+            cmap = threshold_cmap(threshold) # Rebuild the colormap with the cut at this frame's threshold
+            if mesh is not None: # If the fan has already been drawn...
+                mesh.set_cmap(cmap) # Recolor it
+            colorbar_mappable.set_cmap(cmap) # Recolor colorbar
+            colorbar.update_normal(colorbar_mappable) # Redraw colorbar
+            colorbar.set_ticks([0, threshold, 255]) # Move threshold tick
+            colorbar.set_label(f'Echo Intensity (Blue: ≤ {threshold}, Filtered Out; Red: Survives)') # Update label
+            threshold_marker.set_ydata([threshold + 0.5] * 2) # Move threshold line on colorbar
+            for bar, color in zip(intensity_bars, cmap(norm(intensities))): # Recolor intensity histogram
+                bar.set_facecolor(color) # Recolor bar
+            intensity_line.set_xdata([threshold] * 2) # Move threshold line on intensity histogram
+            intensity_legend.get_texts()[0].set_text(f'Intensity Threshold ({threshold})') # Update legend
+            ax_range.set_ylabel(f'Samples with Intensity > {threshold}') # Update range histogram label
 
         # Sonar fan
         frame_window = (min_range[i], max_range[i], n_bins) # Establish window from frame parameters
@@ -336,6 +418,8 @@ def main():
             rejected.set_offsets(np.column_stack([peak_x[~keep], peak_y[~keep]])) # Remove outlier peaks
         peaks.set_offsets(np.column_stack([peak_x[keep], peak_y[keep]])) # Move markers to this frame's peaks, converted from polar to cartesian (meters)
         count_text = f'Peaks: {keep.sum()} of {beam_angle.size} beams' # Get number of kept peaks out of the total beams
+        if args.dynamic_threshold_coef > 0: # If the dynamic threshold is on...
+            count_text += f'\nThreshold: {threshold}' # Report this frame's threshold
         if rejected is not None: # If either filter is on...
             count_text += f'\nRejected: {(~keep).sum()} (MAD {n_mad_rejected}, median {(~keep).sum() - n_mad_rejected})' # Report how many peaks were removed, and by which filter
         window_width = min(max_range[i], args.max_range) - max(min_range[i], args.min_range) # Get width (m) of the window peaks can fall in, the instrument's range cut down by the range filter
@@ -345,14 +429,8 @@ def main():
         count_text += f'\nConcentration: {concentration:.2f}\nCoherence: {coherence:.2f}' # Report both ratios in figure
         if args.no_structure_test: # If the coherence/concentration structure test is off...
             skip_reason = None # Draw a spline for all frames with peaks above minimum
-        elif np.isnan(coherence): # If there are not enough peaks to test...
-            skip_reason = 'too few peaks' # Report too few peaks
-        elif coherence > args.structure_max_coherence: #  If the calculated coherence is greater than the user set cutoff...
-            skip_reason = 'coherence' # Report spline not drawn due to coherence test failing
-        elif args.structure_max_concentration is not None and concentration > args.structure_max_concentration: # If calculated concentration is greater than the user set cutoff...
-            skip_reason = 'concentration' # Report spline is not drawn due to concentration test failing
-        else: # If all tests are passed
-            skip_reason = None # Report nothing
+        else:
+            skip_reason = structure_skip_reason(concentration, coherence, args.structure_max_coherence, args.structure_max_concentration) # Get why the frame fails, None if it passes
         if spline_line is not None: # If the spline is turned on...
             if skip_reason is None: # And if the frame passed the test...
                 spline_line.set_data(*fit_peak_spline(peak_beams[keep], peak_r[keep], beam_angle, args.spline_lam, args.spline_min_peaks, args.spline_max_gap, args.spline_max_jump)) # Fit this frame's peaks and move the line to it

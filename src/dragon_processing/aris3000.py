@@ -4,7 +4,7 @@ import numpy as np
 import xarray as xr
 from .adcp import define_rotation_nortek_XYZ_to_ENU
 
-from .utilities import convert_matlab_datenum, decode_matlab_char, interp_datetime64 # NEEDS REVIEW: interp_datetime64 added for CTD depth
+from .utilities import convert_matlab_datenum, decode_matlab_char, interp_datetime64
 
 
 def get_beam_direction_in_nortek_instrument_coords(beam_angles,degrees=True):

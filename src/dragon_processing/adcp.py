@@ -1467,6 +1467,9 @@ def process_deployment_adcp(deployment_path,processed_path,qc,lat,overwrite=Fals
         # adcp_files = list(sig.rglob('*.mat'))
         adcp_files = defaultdict(list)
         for raw_file in sig.rglob('*.mat'):
+            # Skips macOS metadata files (._*) that cause error
+            if raw_file.name.startswith('._'):
+                continue
             adcp_files[raw_file.name.split('.')[0]].append(raw_file)
         # grouped_files = defaultdict(list)
         # adcp_names = [file.name.split('.')[0] for file in adcp_files]
@@ -1510,7 +1513,7 @@ def process_deployment_adcp(deployment_path,processed_path,qc,lat,overwrite=Fals
             if not proc_adcp_list:
                 raise ValueError(f'no processed adcp data for {file_name}. Probably an error in the code.')
             elif len(proc_adcp_list)>1:
-                print('joinging multiple processed files into one dataset')
+                print('joining multiple processed files into one dataset')
                 #identify all time stamps
                 order = np.argsort([temp.time.data[0] for temp in proc_adcp_list])
                 proc_adcp_list = [proc_adcp_list[i] for i in order]

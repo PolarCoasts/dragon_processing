@@ -58,7 +58,7 @@ def plot_beam_variable(data,variable_name,cmap,title=None,vmin=None,vmax=None,wi
         ax.set_aspect('equal', adjustable='box')
 
     cbar = plt.colorbar(pc,cax=cbar_ax)
-    cbar.set_label(f'{variable_name} ({data[variable_name].attrs['units']})')
+    cbar.set_label(f'{variable_name} ({data[variable_name].attrs["units"]})')
 
     fig.suptitle(title)
     if distance_max:
@@ -103,7 +103,7 @@ def plot_gridded_variable(data, variable_name, cmap, label_dim, title=None, vmin
         ax.set_aspect('equal', adjustable='box')
 
     cbar = plt.colorbar(pc,cax=cbar_ax)
-    cbar.set_label(f'{variable_name} ({data[variable_name].attrs['units']})')
+    cbar.set_label(f'{variable_name} ({data[variable_name].attrs["units"]})')
 
     fig.suptitle(title)
     if distance_max:

@@ -1,7 +1,13 @@
 # Python
 __pycache__/
 
-#macOS
+ macOS
 .DS_Store
+
+# Local folders
+.venv/
+run/
+data/
+docs/
 
 dragon_processing.egg-info/

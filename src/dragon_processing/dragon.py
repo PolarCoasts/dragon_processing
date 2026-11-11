@@ -641,7 +641,7 @@ def process_all(
         # I think this needs to be moved later because of memory usage, but maybe not.
         # but first, I might want to try storing with an aris_file coordinate so I don't have to extend all the datasets to a 4000 long bin coordinate
         if include_aris:
-            aris = process_deployment_aris(dep, aris_frequency=config.aris_frequency, overwrite=overwrite)
+            aris = process_deployment_aris(dep, aris_frequency=config.aris_frequency, overwrite=overwrite, ctd=ctd) # Pass CTD data
         else:
             aris = None
 
